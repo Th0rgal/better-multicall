@@ -26,6 +26,12 @@ struct AccountCallArray {
     data_len: felt,
 }
 
+//call_array:
+//{ contrat, function, offset : 0, taille : 2 }
+//{ contrat, function, offset : 2, taille : 3 }
+//calldata:
+//[ a, b, c, d, e]
+
 func execute{
     syscall_ptr: felt*,
     pedersen_ptr: HashBuiltin*,
