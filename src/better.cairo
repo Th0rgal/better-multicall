@@ -15,7 +15,7 @@ struct Type {
     REFERENCE: felt,
 }
 
-// if type is default, data is a reference,
+// if type is default, data is a value,
 // otherwise it's an index in output
 struct Felt {
     type: felt,
