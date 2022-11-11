@@ -10,27 +10,7 @@ from starkware.starknet.common.syscalls import (
     get_tx_info,
 )
 
-struct Type {
-    DEFAULT: felt,
-    REFERENCE: felt,
-}
-
-// if type is default, data is a value,
-// otherwise it's an index in output
-struct Felt {
-    type: felt,
-    data: felt,
-}
-
-struct BetterCall {
-    to: felt,
-    selector: felt,
-    calldata_len: felt,
-    calldata: Felt*,
-}
-
-// Tmp struct introduced while we wait for Cairo
-// to support passing `[AccountCall]` to __execute__
+// From the execute interface
 struct AccountCallArray {
     to: felt,
     selector: felt,
@@ -38,118 +18,117 @@ struct AccountCallArray {
     data_len: felt,
 }
 
-// call_array:
-// { contrat, function, offset : 0, taille : 2 }
-// { contrat, function, offset : 2, taille : 3 }
-// calldata:
-// [ a, b, c, d, e]
-
-func better_execute{
+func execute{
     syscall_ptr: felt*,
     pedersen_ptr: HashBuiltin*,
     ecdsa_ptr: SignatureBuiltin*,
     bitwise_ptr: BitwiseBuiltin*,
     range_check_ptr,
-}(call_array_len: felt, call_array: AccountCallArray*, calldata_len: felt, calldata: Felt*) -> (
+}(call_array_len: felt, call_array: AccountCallArray*, calldata_len: felt, calldata: felt*) -> (
     response_len: felt, response: felt*
 ) {
-    alloc_locals;
-
-    let (tx_info) = get_tx_info();
-    with_attr error_message("Account: invalid tx version") {
-        assert tx_info.version = 1;
-    }
-
-    // assert not a reentrant call
-    let (caller) = get_caller_address();
-    with_attr error_message("Account: no reentrant call") {
-        assert caller = 0;
-    }
-
-    // TMP: Convert `AccountCallArray` to 'Call'.
-    let (calls: BetterCall*) = alloc();
-    _better_from_call_array_to_call(call_array_len, call_array, calldata, calls);
-    let calls_len = call_array_len;
-
-    // execute call
-    let (response: felt*) = alloc();
-    let (response_len) = _better_execute_list(calls_len, calls, 0, response);
-
-    return (response_len=response_len, response=response);
+    let (offsets_len, offsets: felt*, response_len, response: felt*) = rec_execute(
+        call_array_len, call_array, calldata
+    );
+    return (response_len, response);
 }
 
-func _better_from_call_array_to_call{syscall_ptr: felt*}(
-    call_array_len: felt, call_array: AccountCallArray*, calldata: Felt*, calls: BetterCall*
+func rec_execute{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    ecdsa_ptr: SignatureBuiltin*,
+    bitwise_ptr: BitwiseBuiltin*,
+    range_check_ptr,
+}(call_array_len: felt, call_array: AccountCallArray*, calldata: felt*) -> (
+    offsets_len: felt, offsets: felt*, response_len: felt, response: felt*
 ) {
-    // if no more calls
+    alloc_locals;
     if (call_array_len == 0) {
-        return ();
+        let (response) = alloc();
+        let (offsets) = alloc();
+        assert offsets[0] = 0;
+        return (1, offsets, 0, response);
     }
 
-    // parse the current call
-    assert [calls] = BetterCall(
-        to=[call_array].to,
-        selector=[call_array].selector,
-        calldata_len=[call_array].data_len,
-        calldata=calldata + [call_array].data_offset
-        );
-
-    // parse the remaining calls recursively
-    _better_from_call_array_to_call(
-        call_array_len - 1, call_array + AccountCallArray.SIZE, calldata, calls + BetterCall.SIZE
+    // call recursively all previous calls
+    let (offsets_len, offsets: felt*, response_len, response: felt*) = rec_execute(
+        call_array_len - 1, call_array, calldata
     );
-    return ();
-}
 
-func _better_execute_list{syscall_ptr: felt*}(
-    calls_len: felt, calls: BetterCall*, response_len, response: felt*
-) -> (response_len: felt) {
-    alloc_locals;
+    // handle the last call
+    let last_call = call_array[call_array_len - 1];
 
-    // if no more calls
-    if (calls_len == 0) {
-        return (response_len=response_len);
-    }
+    let (inputs: felt*) = alloc();
+    compile_call_inputs(
+        inputs, last_call.data_len, calldata + last_call.data_offset, offsets_len, offsets, response
+    );
 
-    // do the current call
-    let this_call: BetterCall = [calls];
-
-    // write calldata
-    let (calldata) = alloc();
-    write_calldata(calldata, this_call.calldata_len, this_call.calldata, response);
-
+    // call the last call
     let res = call_contract(
-        contract_address=this_call.to,
-        function_selector=this_call.selector,
-        calldata_size=this_call.calldata_len,
-        calldata=calldata,
+        contract_address=last_call.to,
+        function_selector=last_call.selector,
+        calldata_size=last_call.data_len,
+        calldata=inputs,
     );
 
-    let yolo = res.retdata_size;
-
-    // copy the result in response
+    // store response data
     memcpy(response + response_len, res.retdata, res.retdata_size);
-    // do the next calls recursively
-    return _better_execute_list(
-        calls_len - 1, calls + BetterCall.SIZE, response_len + res.retdata_size, response
-    );
+    assert offsets[offsets_len] = res.retdata_size + offsets[offsets_len - 1];
+    return (offsets_len + 1, offsets, response_len + res.retdata_size, response);
 }
 
-func write_calldata{syscall_ptr: felt*}(
-    calldata: felt*, len: felt, dynamic_calldata: Felt*, response: felt*
-) {
-    if (len == 0) {
+// Enumeration of possible CallData prefix
+struct CallDataType {
+    VALUE: felt,
+    REF: felt,
+    CALL_REF: felt,
+    FUNC: felt,
+    FUNC_CALL: felt,
+}
+
+func compile_call_inputs{syscall_ptr: felt*}(
+    inputs: felt*,
+    call_len,
+    shifted_calldata: felt*,
+    offsets_len: felt,
+    offsets: felt*,
+    response: felt*,
+) -> () {
+    if (call_len == 0) {
         return ();
     }
 
-    tempvar id = len - 1;
-    let to_add: Felt = dynamic_calldata[id];
-
-    if (to_add.type == Type.DEFAULT) {
-        assert calldata[id] = to_add.data;
-        return write_calldata(calldata, id, dynamic_calldata, response);
-    } else {
-        assert calldata[id] = response[to_add.data];
-        return write_calldata(calldata, id, dynamic_calldata, response);
+    tempvar type = [shifted_calldata];
+    if (type == CallDataType.VALUE) {
+        // 1 -> value
+        assert [inputs] = shifted_calldata[1];
+        return compile_call_inputs(
+            inputs + 1, call_len - 1, shifted_calldata + 2, offsets_len, offsets, response
+        );
     }
+
+    if (type == CallDataType.REF) {
+        // 1 -> shift
+        assert [inputs] = response[shifted_calldata[1]];
+        return compile_call_inputs(
+            inputs + 1, call_len - 1, shifted_calldata + 2, offsets_len, offsets, response
+        );
+    }
+
+    if (type == CallDataType.CALL_REF) {
+        // 1 -> call_id, 2 -> shift
+        let call_id = shifted_calldata[1];
+        let shift = shifted_calldata[2];
+        let call_shift = offsets[call_id];
+
+        let value = response[offsets[shifted_calldata[1]] + shifted_calldata[2]];
+        assert [inputs] = value;
+        return compile_call_inputs(
+            inputs + 1, call_len - 1, shifted_calldata + 3, offsets_len, offsets, response
+        );
+    }
+
+    // should not be called (todo: put the default case)
+    assert 1 = 0;
+    ret;
 }

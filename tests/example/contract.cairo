@@ -2,6 +2,7 @@
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin
 from starkware.starknet.common.syscalls import get_caller_address
+from starkware.cairo.common.registers import get_label_location
 from tests.example.interface import NFT
 
 @storage_var
@@ -44,4 +45,18 @@ func read_nft{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(i
     nft: NFT
 ) {
     return nfts.read(id);
+}
+
+@view
+func get_bullshit{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() -> (
+    bullshit_len: felt, bullshit: felt*
+) {
+    let (data_address) = get_label_location(bullshit);
+    return (3, cast(data_address, felt*));
+
+    // this is an example of an array of "unknown" size
+    bullshit:
+    dw 314;
+    dw 159;
+    dw 265;
 }

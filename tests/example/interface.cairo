@@ -15,4 +15,7 @@ namespace ExampleContract {
 
     func read_nft(id) -> (nft: NFT) {
     }
+
+    func get_bullshit() -> (bullshit_len: felt, bullshit: felt*) {
+    }
 }
