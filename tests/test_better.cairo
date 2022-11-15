@@ -93,7 +93,7 @@ func test_ref_to_specific_call{
     assert callarray[1] = AccountCallArray(example_contract_addr, mint_nft_selector, 0, 0);
     assert callarray[2] = AccountCallArray(example_contract_addr, set_nft_name_selector, 0, 2);
 
-    let (result_len, result: felt*) = execute(3, callarray, 2, calldata);
+    let (result_len, result: felt*) = execute(3, callarray, 5, calldata);
     assert result_len = 5;
 
     let minted_nft = result[result_len - 1];
