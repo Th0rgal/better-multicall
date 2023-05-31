@@ -10,6 +10,13 @@ from starkware.starknet.common.syscalls import (
     get_tx_info,
 )
 
+struct Call {
+    to: felt,
+    selector: felt,
+    calldata_len: felt,
+    calldata: felt*,
+}
+
 // From the execute interface
 struct AccountCallArray {
     to: felt,
@@ -27,8 +34,14 @@ func execute{
 }(call_array_len: felt, call_array: AccountCallArray*, calldata_len: felt, calldata: felt*) -> (
     response_len: felt, response: felt*
 ) {
+
+    // TMP: Convert `AccountCallArray` to 'Call'.
+    let (calls: Call*) = alloc();
+    _from_call_array_to_call(call_array_len, call_array, calldata, calls);
+    let calls_len = call_array_len;
+
     let (offsets_len, offsets: felt*, response_len, response: felt*) = rec_execute(
-        call_array_len, call_array, calldata
+        calls_len, calls
     );
     return (response_len, response);
 }
@@ -39,11 +52,11 @@ func rec_execute{
     ecdsa_ptr: SignatureBuiltin*,
     bitwise_ptr: BitwiseBuiltin*,
     range_check_ptr,
-}(call_array_len: felt, call_array: AccountCallArray*, calldata: felt*) -> (
+}(calls_len: felt, calls: Call*) -> (
     offsets_len: felt, offsets: felt*, response_len: felt, response: felt*
 ) {
     alloc_locals;
-    if (call_array_len == 0) {
+    if (calls_len == 0) {
         let (response) = alloc();
         let (offsets) = alloc();
         assert offsets[0] = 0;
@@ -52,22 +65,22 @@ func rec_execute{
 
     // call recursively all previous calls
     let (offsets_len, offsets: felt*, response_len, response: felt*) = rec_execute(
-        call_array_len - 1, call_array, calldata
+        calls_len - 1, calls
     );
 
     // handle the last call
-    let last_call = call_array[call_array_len - 1];
+    let last_call = calls[calls_len - 1];
 
     let (inputs: felt*) = alloc();
     compile_call_inputs(
-        inputs, last_call.data_len, calldata + last_call.data_offset, offsets_len, offsets, response
+        inputs, last_call.calldata_len, last_call.calldata, offsets, response
     );
 
     // call the last call
     let res = call_contract(
         contract_address=last_call.to,
         function_selector=last_call.selector,
-        calldata_size=last_call.data_len,
+        calldata_size=last_call.calldata_len,
         calldata=inputs,
     );
 
@@ -90,7 +103,6 @@ func compile_call_inputs{syscall_ptr: felt*}(
     inputs: felt*,
     call_len,
     shifted_calldata: felt*,
-    offsets_len: felt,
     offsets: felt*,
     response: felt*,
 ) -> () {
@@ -103,15 +115,16 @@ func compile_call_inputs{syscall_ptr: felt*}(
         // 1 -> value
         assert [inputs] = shifted_calldata[1];
         return compile_call_inputs(
-            inputs + 1, call_len - 1, shifted_calldata + 2, offsets_len, offsets, response
+            inputs + 1, call_len - 1, shifted_calldata + 2, offsets, response
         );
     }
 
     if (type == CallDataType.REF) {
         // 1 -> shift
-        assert [inputs] = response[shifted_calldata[1]];
+        let shift = shifted_calldata[1];
+        assert [inputs] = response[shift];
         return compile_call_inputs(
-            inputs + 1, call_len - 1, shifted_calldata + 2, offsets_len, offsets, response
+            inputs + 1, call_len - 1, shifted_calldata + 2, offsets, response
         );
     }
 
@@ -121,14 +134,36 @@ func compile_call_inputs{syscall_ptr: felt*}(
         let shift = shifted_calldata[2];
         let call_shift = offsets[call_id];
 
-        let value = response[offsets[shifted_calldata[1]] + shifted_calldata[2]];
+        let value = response[call_shift + shift];
         assert [inputs] = value;
         return compile_call_inputs(
-            inputs + 1, call_len - 1, shifted_calldata + 3, offsets_len, offsets, response
+            inputs + 1, call_len - 1, shifted_calldata + 3, offsets, response
         );
     }
 
     // should not be called (todo: put the default case)
     assert 1 = 0;
     ret;
+}
+
+func _from_call_array_to_call{syscall_ptr: felt*}(
+    call_array_len: felt, call_array: AccountCallArray*, calldata: felt*, calls: Call*
+) {
+    // if no more calls
+    if (call_array_len == 0) {
+        return ();
+    }
+
+    // parse the current call
+    assert [calls] = Call(
+        to=[call_array].to,
+        selector=[call_array].selector,
+        calldata_len=[call_array].data_len,
+        calldata=calldata + [call_array].data_offset
+        );
+    // parse the remaining calls recursively
+    _from_call_array_to_call(
+        call_array_len - 1, call_array + AccountCallArray.SIZE, calldata, calls + Call.SIZE
+    );
+    return ();
 }
